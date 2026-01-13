@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dllm-serve"
+version = "0.2.0"
+authors = [{ name = "Yanglin Zhang" }, { name = "Jiakun Fan"}]
+license = "MIT"
+license-files = ["LICENSE"]
+readme = "README.md"
+description = "A lightweight LLM serving framework with fast inference"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "torch>=2.4.0",
+    "triton>=3.0.0",
+    "transformers>=4.51.0",
+    "xxhash",
+    "fastapi",
+    "uvicorn",
+    "black",
+    "lm-eval",
+    "flash-attn>=2.0.0",
+    "einops"
+]
+
+[project.urls]
+Homepage = "https://github.com/chosen-ox/dLLM-Serve"
+Documentation = "https://github.com/chosen-ox/dLLM-Serve/tree/main/docs"
+Issues = "https://github.com/chosen-ox/dLLM-Serve/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["dllmserve*"]
