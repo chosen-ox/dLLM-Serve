@@ -22,6 +22,7 @@ class Config:
     num_kvcache_blocks: int = -1
     max_logprobs: int = 1024
     log_optimize_level: int = 2
+    optimize_final_layer: bool = False
 
     def __post_init__(self):
         if self.torch_device is None:

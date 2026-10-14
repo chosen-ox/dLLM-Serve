@@ -104,7 +104,13 @@ class Attention(nn.Module):
 
         self.layer_id = None
 
-    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        query_ranges: list[tuple[int, int]] | None = None,
+    ):
         q = q.view(-1, self.num_heads, self.head_dim)
         k = k.view(-1, self.num_kv_heads, self.head_dim)
         v = v.view(-1, self.num_kv_heads, self.head_dim)
@@ -112,6 +118,8 @@ class Attention(nn.Module):
         context = get_context()
 
         if context.is_diffusion:
+            if query_ranges is not None:
+                return self._mixed_sparse_dense_attention(q, k, v, context, query_ranges)
             return self._mixed_sparse_dense_attention(q, k, v, context)
         else:
             if self.k_cache.numel() and self.v_cache.numel():
@@ -147,7 +155,7 @@ class Attention(nn.Module):
             )
         return o.view(-1, self.num_heads * self.head_dim)
 
-    def _mixed_sparse_dense_attention(self, q, k, v, context):
+    def _mixed_sparse_dense_attention(self, q, k, v, context, query_ranges=None):
         """
         Handle mixed batch with K/V caching instead of index caching.
         """
@@ -171,26 +179,30 @@ class Attention(nn.Module):
                 seq_start, seq_end = cu_seqlens_k[i], cu_seqlens_k[i + 1]
                 seq_indices = torch.arange(seq_start, seq_end, device=device)
 
-                Q_list_varlen.append(q[seq_indices])
+                query_indices = seq_indices if query_ranges is None else torch.arange(
+                    *query_ranges[i], device=device
+                )
+                Q_list_varlen.append(q[query_indices])
                 K_list_varlen.append(k[seq_indices])
                 V_list_varlen.append(v[seq_indices])
 
-                output_positions_varlen.append(seq_indices)
+                output_positions_varlen.append(query_indices)
             elif seq.sparse_state.should_compute_cache:
                 k_seq_start, k_seq_end = cu_seqlens_k[i], cu_seqlens_k[i + 1]
                 seq_indices = torch.arange(k_seq_start, k_seq_end, device=device)
 
-                Q_list_varlen.append(q[seq_indices])
+                query_indices = seq_indices if query_ranges is None else torch.arange(
+                    *query_ranges[i], device=device
+                )
+                Q_list_varlen.append(q[query_indices])
                 K_list_varlen.append(k[seq_indices])
                 V_list_varlen.append(v[seq_indices])
 
-                output_positions_varlen.append(seq_indices)
+                output_positions_varlen.append(query_indices)
 
                 # Cache import KV
                 block_indices = (
-                    seq.sparse_state.get_block_indices(
-                        seq.num_prompt_tokens, seq.num_tokens
-                    )
+                    seq.sparse_state.get_block_indices(seq.num_prompt_tokens, seq.num_tokens)
                     + k_seq_start
                 )
 
@@ -284,7 +296,7 @@ class Attention(nn.Module):
             torch.tensor(k_lens_varlen, device=device, dtype=torch.int32), dim=0
         )
 
-        outputs = torch.zeros_like(q)
+        outputs = torch.zeros_like(q) if query_ranges is None else None
 
         attn_out = flash_attn_varlen_func(
             Q_all_varlen,
@@ -297,6 +309,11 @@ class Attention(nn.Module):
             softmax_scale=self.scale,
             causal=False,
         )
+
+        if query_ranges is not None:
+            # Cache selection above used full Q/K/V. Return query outputs in
+            # packed range order for the final layer's row-local consumers.
+            return attn_out.view(-1, self.num_heads * self.head_dim)
 
         offset = 0
         for seq_indices, q_len in zip(output_positions_varlen, q_lens_varlen):
@@ -321,18 +338,20 @@ class Attention(nn.Module):
             k_exp = k_candidates.repeat_interleave(repeat_factor, dim=1)
 
         # Compute importance scores
-        scores = torch.einsum("qhd,khd->qk", q_avg, k_exp).squeeze(0) / (
-            self.head_dim**0.5
-        )
+        scores = torch.einsum("qhd,khd->qk", q_avg, k_exp).squeeze(0) / (self.head_dim**0.5)
 
         # Apply max pooling if specified
         if seq.sparse_state.pool_kernel > 1 and scores.numel() > 0:
-            scores = F.max_pool1d(
-                scores.unsqueeze(0).unsqueeze(0),
-                kernel_size=seq.sparse_state.pool_kernel,
-                stride=1,
-                padding=seq.sparse_state.pool_kernel // 2,
-            ).squeeze(0).squeeze(0)[: scores.numel()]
+            scores = (
+                F.max_pool1d(
+                    scores.unsqueeze(0).unsqueeze(0),
+                    kernel_size=seq.sparse_state.pool_kernel,
+                    stride=1,
+                    padding=seq.sparse_state.pool_kernel // 2,
+                )
+                .squeeze(0)
+                .squeeze(0)[: scores.numel()]
+            )
 
         # Select top-k by ratio
         n_keep = max(1, int(k_candidates.size(0) * seq.sparse_state.retention_ratio))
