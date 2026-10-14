@@ -13,6 +13,7 @@ from dllmserve.config import Config
 from dllmserve.engine.sequence import Sequence
 from dllmserve.sampling_params import SamplingParams
 from dllmserve.utils.context import set_context, get_context, reset_context
+from dllmserve.utils.output_demand import final_layer_query_ranges
 from dllmserve.utils.loader import load_model
 from dllmserve.models.llada import LLaDAForMaskedLM
 from dllmserve.models.dream import DreamForMaskedLM
@@ -306,6 +307,19 @@ class ModelRunner:
         position_ids_compute = torch.cat(position_ids_list, dim=0)
         block_tables = self.prepare_block_tables(seqs)
 
+        query_ranges = None
+        output_indices = None
+        if (
+            self.config.optimize_final_layer
+            and self.config.log_optimize_level == 2
+            and getattr(self.model, "uses_shifted_prediction", False)
+        ):
+            query_ranges = final_layer_query_ranges(seqs)
+            if query_ranges is not None:
+                output_indices = torch.cat(
+                    [torch.arange(start, end, device=device) for start, end in query_ranges]
+                )
+
         # Set context with optimized indices
         set_context(
             is_prefill=True,
@@ -318,6 +332,8 @@ class ModelRunner:
             slot_mapping=slot_mapping,
             extra_slot_mapping=extra_slot_mapping,
             block_tables=block_tables,
+            final_layer_query_ranges=query_ranges,
+            final_layer_output_indices=output_indices,
         )
 
         # Forward through model with only necessary tokens

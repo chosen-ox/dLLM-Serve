@@ -122,6 +122,19 @@ outputs = llm.generate(
 )
 ```
 
+### Dream final-layer output optimization
+
+`LLM("./Dream-v0-Instruct-7B", optimize_final_layer=True, log_optimize_level=2)`
+enables an opt-in optimization for Dream. During full/Refresh steps, the last
+layer computes attention outputs, output projection and FFN only for the rows
+needed by generation, with a conservative prefix halo for query tiling. Full
+QKV projection and KV-cache selection are preserved. Reuse steps retain their
+existing computation. The option defaults to `False` and is inactive for
+other models or log optimization levels. Floating-point results can differ
+with GEMM/query shapes; validate generated outputs for your workload.
+Use `python tests/performance/bench_final_layer_output.py --model /path/to/Dream`
+to compare complete generation with your installed attention backend.
+
 ### Server Deployment
 
 ```bash

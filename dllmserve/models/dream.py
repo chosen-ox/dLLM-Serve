@@ -9,6 +9,7 @@ from dllmserve.layers.linear import ColumnParallelLinear, RowParallelLinear, Mer
 from dllmserve.layers.rotary_embedding import get_rope
 from dllmserve.layers.embed_head import VocabParallelEmbedding, ParallelLMHead
 from dllmserve.layers.activation import SiluAndMul
+from dllmserve.utils.context import get_context
 
 
 class DreamMLP(nn.Module):
@@ -71,7 +72,7 @@ class DreamAttention(nn.Module):
         )
 
     def forward(
-        self, positions: torch.Tensor, hidden_states: torch.Tensor
+        self, positions: torch.Tensor, hidden_states: torch.Tensor, query_ranges=None
     ) -> torch.Tensor:
         # hidden_states shape: (total_tokens, hidden_size)
         # positions shape: (total_tokens,)
@@ -90,7 +91,10 @@ class DreamAttention(nn.Module):
         q, k = self.rotary_emb(positions, q, k)
 
         # Apply attention
-        attn_output = self.attn(q, k, v)  # Returns (num_tokens, hidden_size)
+        if query_ranges is None:
+            attn_output = self.attn(q, k, v)
+        else:
+            attn_output = self.attn(q, k, v, query_ranges=query_ranges)
 
         attn_output = self.o_proj(attn_output)
         return attn_output
@@ -108,12 +112,20 @@ class DreamDecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
-        self, positions: torch.Tensor, hidden_states: torch.Tensor
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        output_indices: torch.Tensor | None = None,
+        query_ranges=None,
     ) -> torch.Tensor:
         # Self-attention block
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(positions, hidden_states)
+        if output_indices is None:
+            hidden_states = self.self_attn(positions, hidden_states)
+        else:
+            hidden_states = self.self_attn(positions, hidden_states, query_ranges=query_ranges)
+            residual = residual[output_indices]
         hidden_states = residual + hidden_states
 
         # MLP block
@@ -165,8 +177,22 @@ class DreamForMaskedLM(nn.Module):
         hidden_states = self.model.embed_tokens(input_ids)
         # hidden_states shape: (batch_size * seq_len, hidden_size)
 
-        for layer in self.model.layers:
-            hidden_states = layer(positions, hidden_states)
+        context = get_context()
+        indices = context.final_layer_output_indices if context.is_diffusion else None
+        for i, layer in enumerate(self.model.layers):
+            if indices is not None and i == len(self.model.layers) - 1:
+                selected = layer(
+                    positions,
+                    hidden_states,
+                    output_indices=indices,
+                    query_ranges=context.final_layer_query_ranges,
+                )
+                # Preserve the runner's full-shaped shifted-output interface.
+                # Unselected rows have no logits consumer at optimization level 2.
+                hidden_states = torch.zeros_like(hidden_states)
+                hidden_states[indices] = selected
+            else:
+                hidden_states = layer(positions, hidden_states)
 
         hidden_states = self.model.norm(hidden_states)
         return hidden_states

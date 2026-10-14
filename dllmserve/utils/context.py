@@ -16,6 +16,8 @@ class Context:
     block_tables: torch.Tensor | None = None
     is_diffusion: bool = False
     seqs: Optional[list] = None
+    final_layer_query_ranges: list[tuple[int, int]] | None = None
+    final_layer_output_indices: torch.Tensor | None = None
 
 
 _CONTEXT = Context()
@@ -37,6 +39,8 @@ def set_context(
     block_tables=None,
     is_diffusion=False,
     seqs=None,
+    final_layer_query_ranges=None,
+    final_layer_output_indices=None,
 ):
     """
     Backward-compatible context setter.
@@ -59,6 +63,8 @@ def set_context(
         block_tables=block_tables,
         is_diffusion=is_diffusion,
         seqs=seqs,
+        final_layer_query_ranges=final_layer_query_ranges,
+        final_layer_output_indices=final_layer_output_indices,
     )
     _CONTEXT = ctx
 
